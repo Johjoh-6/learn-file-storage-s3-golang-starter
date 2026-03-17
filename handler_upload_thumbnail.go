@@ -2,11 +2,14 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
 )
+
+const maxMemory = 10 << 20 // 10 MB
 
 func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Request) {
 	videoIDString := r.PathValue("videoID")
@@ -28,10 +31,54 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-
 	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
 
-	// TODO: implement the upload here
+	err = r.ParseMultipartForm(maxMemory)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't parse form", err)
+		return
+	}
+	// get the image file from the request
+	file, header, err := r.FormFile("thumbnail")
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't get thumbnail", err)
+		return
+	}
+	// get the file type
+	fileType := header.Header.Get("Content-Type")
+	// read all file data
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't read thumbnail", err)
+		return
+	}
 
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	// get video from db
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't get video", err)
+		return
+	}
+	// check if the user is the owner of the video
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "You are not the owner of this video", nil)
+		return
+	}
+	thumbnail := thumbnail{
+		data:      fileData,
+		mediaType: fileType,
+	}
+
+	// save in the global map
+	videoThumbnails[videoID] = thumbnail
+
+	// update video metadata.
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID.String())
+	video.ThumbnailURL = &thumbnailURL
+	if err := cfg.db.UpdateVideo(video); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update video", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, video)
 }
